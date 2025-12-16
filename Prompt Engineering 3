@@ -1,0 +1,48 @@
+# 3_self_reflection.py
+from llm_helper import call_llm
+
+SYSTEM = "You are a precise editor. Be concise, specific, and constructive."
+
+CRITIC_PROMPT = """You're evaluating the following summary for clarity, accuracy, completeness, and concision.
+Return JSON with keys:
+- strengths: 1-3 short bullets
+- issues: 2-5 concrete issues (quote problematic text when helpful)
+- fix_plan: 3-6 bullet plan of improvements (specific edits, not generic advice)
+Summary:
+\"\"\"{summary}\"\"\"
+Only return JSON.
+"""
+
+REWRITE_PROMPT = """Improve the summary using the critique below.
+Rules:
+- Keep it 90–140 words.
+- Fix inaccuracies, tighten wording, improve structure.
+- Preserve all critical facts.
+Critique:
+{critique}
+Original Summary:
+\"\"\"{summary}\"\"\"
+Return only the improved summary (no preface).
+"""
+
+def self_refine(summary: str) -> dict:
+    # Step 1: Critique
+    critique = call_llm(
+        [{"role":"system","content":SYSTEM},
+         {"role":"user","content":CRITIC_PROMPT.format(summary=summary)}],
+        temperature=0.2
+    )
+    # Step 2: Improve
+    improved = call_llm(
+        [{"role":"system","content":SYSTEM},
+         {"role":"user","content":REWRITE_PROMPT.format(critique=critique, summary=summary)}],
+        temperature=0.3
+    )
+    return {"critique": critique, "improved": improved}
+
+if __name__ == "__main__":
+    draft = ("NimbusNet’s new plan expands speeds but some users see unstable Wi-Fi and billing confusion. "
+             "Support should remind customers to reboot. The rollout started last month across regions.")
+    out = self_refine(draft)
+    print("=== CRITIQUE ===\n", out["critique"])
+    print("\n=== IMPROVED SUMMARY ===\n", out["improved"])
