@@ -1,0 +1,182 @@
+# @title Customer Support Prompt Chain (Colab-ready)
+# @markdown - Runs in **mock mode** by default (no API key needed).
+# @markdown - Set `USE_MOCK = False` and provide `OPENAI_API_KEY` to use a real model.
+
+from __future__ import annotations
+import os, json, re
+from dataclasses import dataclass
+
+# ===================== CONFIG =====================
+USE_MOCK = True  # <- set to False to call a real LLM (OpenAI example below)
+OPENAI_MODEL = "gpt-4o-mini"
+SYSTEM = "You are a helpful, concise customer support assistant for a company called 'NimbusNet'."
+
+# ===================== LLM HELPER =====================
+def call_llm(messages, model=OPENAI_MODEL, temperature=0.2) -> str:
+    """
+    Replace with your provider if desired. In mock mode, returns canned outputs.
+    """
+    if USE_MOCK:
+        return _mock_llm(messages)
+
+    # ---- Real OpenAI call (optional) ----
+    # pip install openai
+    try:
+        from openai import OpenAI
+    except Exception as e:
+        raise RuntimeError("Install `openai` first: pip install openai") from e
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Please set OPENAI_API_KEY environment variable.")
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+    )
+    return resp.choices[0].message.content
+
+# ===================== MOCK (NO API NEEDED) =====================
+def _mock_llm(messages) -> str:
+    """
+    Minimal mock so this runs in Colab without internet or keys.
+    Looks at the last user prompt to return plausible outputs.
+    """
+    last = [m for m in messages if m["role"] == "user"][-1]["content"]
+
+    if "Classify the user's problem" in last:
+        return json.dumps({
+            "category": "technical",
+            "urgency": "high",
+            "summary": "Customer’s Wi-Fi drops about every 20 minutes since yesterday."
+        })
+    if "Draft a step-by-step troubleshooting plan" in last:
+        return (
+            "1) Power-cycle modem and router (unplug 30s, replug).\n"
+            "2) Reseat coax/ethernet cables; check for damage.\n"
+            "3) NimbusNet portal → Devices → Router → run line test.\n"
+            "4) Temporarily disable QoS/traffic shaping to isolate config issues.\n"
+            "5) If drops persist, schedule a technician to check signal levels."
+        )
+    if "Write a friendly response to the customer" in last:
+        return (
+            "Hi! Sorry about the drops—let’s stabilize this fast.\n\n"
+            "Try these steps:\n"
+            "1) Power-cycle your modem and router (unplug 30s, then replug).\n"
+            "2) Reseat all cables (coax/ethernet) and ensure they click in.\n"
+            "3) In the NimbusNet portal → Devices → Router → run a line test.\n"
+            "4) If you use QoS, toggle it off briefly to test behavior.\n"
+            "5) If it still drops, I can book a tech visit right away.\n\n"
+            "Reply here with results and I’ll take the next step."
+        )
+    if "short closing line" in last or "closing line" in last:
+        return "Glad we could help—wishing you smooth streaming! 🙌"
+    return "OK."
+
+# ===================== CHAIN STEPS =====================
+def detect_intent(user_issue: str) -> dict:
+    """
+    Step 1: Identify intent and summarize.
+    Returns dict: {category, urgency, summary}
+    """
+    msg = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": f"""
+Classify the user's problem and extract key fields.
+
+User issue: \"\"\"{user_issue}\"\"\"
+
+Return JSON with:
+- "category": one of ["billing","technical","account","shipping","other"]
+- "urgency": one of ["low","medium","high"]
+- "summary": 1-sentence summary
+Only return JSON.
+"""}]
+    out = call_llm(msg)
+    # Strip possible code fences and parse JSON robustly
+    out = re.sub(r"```(?:json)?|```", "", out).strip()
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        data = {"category": "other", "urgency": "medium", "summary": user_issue[:120]}
+    return data
+
+def troubleshoot(state: dict) -> str:
+    """
+    Step 2: Generate a numbered troubleshooting plan based on detected state.
+    """
+    msg = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": f"""
+Given this classified issue:
+{json.dumps(state, ensure_ascii=False)}
+
+Draft a step-by-step troubleshooting plan (3–6 bullets) tailored to the issue and clearly numbered.
+Avoid generic advice; reference NimbusNet specifics (router reset, plan limits, portal steps).
+"""}]
+    return call_llm(msg)
+
+def craft_response(user_issue: str, plan: str, max_words: int = 140) -> str:
+    """
+    Step 3: Friendly customer response using the plan.
+    """
+    msg = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": f"""
+Write a friendly response to the customer:
+- Start with a 1-sentence acknowledgement referencing their issue: \"{user_issue}\"
+- Include the numbered troubleshooting plan below under "Try these steps:"
+- Offer a fallback/next-step if it fails (e.g., escalate ticket, schedule tech visit)
+- Keep under {max_words} words.
+Troubleshooting plan:
+{plan}
+"""}]
+    return call_llm(msg, temperature=0.4)
+
+def closing_message() -> str:
+    """
+    Step 4: Short, warm closing line.
+    """
+    msg = [
+        {"role": "system", "content": SYSTEM},
+        {"role": "user", "content": "Write a short closing line (<=20 words) that sounds warm and professional."}
+    ]
+    return call_llm(msg, temperature=0.7)
+
+# ===================== ORCHESTRATOR =====================
+@dataclass
+class ChainResult:
+    intent: dict
+    plan: str
+    reply: str
+    closing: str
+
+def run_chain(user_issue: str) -> ChainResult:
+    intent = detect_intent(user_issue)
+    plan = troubleshoot(intent)
+    reply = craft_response(user_issue, plan)
+    closing = closing_message()
+    return ChainResult(intent=intent, plan=plan, reply=reply, closing=closing)
+
+# ===================== DEMO =====================
+# You can change this input and re-run the cell in Colab.
+example_issue = "My internet drops every 20 minutes since yesterday, and I’m on a deadline."
+result = run_chain(example_issue)
+
+print("=== INTENT ===")
+print(json.dumps(result.intent, indent=2, ensure_ascii=False))
+print("\n=== PLAN ===")
+print(result.plan)
+print("\n=== REPLY ===")
+print(result.reply)
+print("\n=== CLOSING ===")
+print(result.closing)
+
+# ===================== HOW TO USE REAL MODEL =====================
+# 1) Set USE_MOCK = False near the top
+# 2) In Colab, run:
+#    %pip install openai
+#    import os; os.environ["OPENAI_API_KEY"] = "sk-..."
+# 3) Re-run this cell.
